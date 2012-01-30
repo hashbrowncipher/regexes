@@ -10,7 +10,8 @@ There are three basic operations involved in regular expression matching.
 We temporarily assume that tokens are just Chars
 
 > type Token = Char
-> type Parse = (Automaton,[Token])
+
+type Parse = (Automaton,[Token])
 
 An action consumes a token (Just x) or nothing (Nothing), and leads to a new state
 An automaton matches a regular expression. 
@@ -58,15 +59,29 @@ left (ton, ('|':xs)) = let (r, rem) = right (Epsilon, xs) in (Split ton r, rem)
 left (ton, ('(':xs)) = let (s, rem) = left (Epsilon, xs) in left (Cons ton s, rem)
 left (ton, (x:xs))   = left ((char ton x), xs)
 
-> data Direction = Lft | Rgt
+data Direction = Lft | Rgt
 
-> parse :: [Direction] -> Parse -> Parse
-> parse [] ret@(ton,[]) = ret
-> parse (Lft:state) (ton, ('|':xs)) = let (r, rem) = parse (Rgt:state) (Epsilon, xs) in (Split ton r, rem)
-> parse (Rgt:state) (ton, (')':xs)) = (ton, xs)
-> parse state (ton, ('(':xs)) = let (s, rem) = parse (Lft:state) (Epsilon, xs) in parse state ((Cons ton s), rem)
-> parse state ((Cons ton x), ('*':xs)) = ((Cons ton $ kleene x), xs)
-> parse state (ton, (x:xs)) = parse state (Cons ton (Take x), xs)
+parse :: [Direction] -> Parse -> Parse
+parse [] ret@(ton,[]) = ret
+parse (Lft:state) (ton, ('|':xs)) = let (r, rem) = parse (Rgt:state) (Epsilon, xs) in (Split ton r, rem)
+parse (Rgt:state) (ton, (')':xs)) = (ton, xs)
+parse state (ton, ('(':xs)) = let (s, rem) = parse (Lft:state) (Epsilon, xs) in parse state ((Cons ton s), rem)
+parse state ((Cons ton x), ('*':xs)) = ((Cons ton $ kleene x), xs)
+parse state (ton, (x:xs)) = parse state (Cons ton (Take x), xs)
+
+
+> data Loc = Lft Parse | Rgt Automaton Parse | Nil deriving Show
+> type Parse = (Automaton, Loc)
+
+> parse						:: Parse -> Char -> Parse
+> parse (left, Lft parent) '|'			= (Epsilon, Rgt left parent)
+> parse (ton, Rgt left (pton, ploc)) ')'	= (Cons pton (Split left ton), ploc)
+> parse state '('				= (Epsilon, Lft state)
+> parse (ton, loc) '*'				= (kleene ton, loc)
+> parse (ton, loc) c				= (Cons ton (Take c), loc)
+
+> parseRegex :: String -> Parse
+> parseRegex = foldl parse (Epsilon, Nil)
 
 data Tree a = Nil | Leaf a | Fork (Tree a) (Tree a) deriving Show
 data Direction = Lft | Rgt | Fwd
