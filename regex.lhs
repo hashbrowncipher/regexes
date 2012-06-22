@@ -20,9 +20,9 @@ An automaton matches a regular expression.  We represent automatons as lists of 
 
 We store with each instruction the location in the original regular expression string from where it came.  This allows us to check for equality when traversing the graph.
 
-> type Automaton = [Instruction]
-> type Pos = Integer
-> data Instruction =
+> type Automaton = [Instruction] --Type synonym
+> type Pos = Integer --Type synonym (they're just so easy to use)
+> data Instruction = --Algebraic type
 > 	Take Pos Token
 > 	| Split Pos Automaton Automaton
 >	deriving (Eq)
@@ -62,6 +62,8 @@ c) not in an alternation (Nil)
 > parse n state '('				= ([], Lft state)
 > parse n (left, Lft parent) '|'		= ([], Rgt (reverse left) parent)
 > parse n (ton, Rgt left (pton, ploc)) ')'	= ((Split n left (reverse ton)):pton, ploc)
+>       -- pton == parent automaton,
+>       -- ploc == parent location
 > parse n (inst:ton, loc) '*'			= ((kleene n inst):ton, loc)
 > parse n (inst:ton, loc) '?'			= ((question n inst):ton, loc)
 > parse n (inst:ton, loc) '+'			= ((plus n inst) ++ ton, loc)
@@ -131,19 +133,27 @@ dfaEdges ton = edges 0 (split ton)
       | not (elem 
 dfaEdge :: [Automaton]
 
-> dfaEdges ton :: Automaton -> Map [Pos] [(Token, [Pos])]
->
-> ify :: Map.Map [Pos] [(Token, Automaton)] -> [Automaton] -> Map.Map [Pos] [(Token, [Pos])]
-> ify map ton = Map.map (\x -> (Set.fold addpos [] x, Set.toList x)) $ Map.fromListWith (Set.union) $ map (transform . next) ton
->   where
->     mapper = transform . next
->
->     transform :: (Token, [Automaton]) -> (Token, Set.Set Automaton)
->     transform (c, tons) = (c, Set.fromList tons)
->
->     -- folds the position of an automaton in with a list
->     addpos :: Automaton -> [Pos] -> [Pos]
->     addpos x accum = pos (head x) : accum 
->
->     reducer :: ([Pos], [Automaton]) -> ([Pos], [Automaton]) -> ([Pos], [Automaton])
->     reducer (x1, y1) (x2, y2) = (x1 ++ x2, y1 ++ y2)
+dfaEdges ton :: Automaton -> Map [Pos] [(Token, [Pos])]
+dfaEdges ton = ify (Map.empty) (split c
+
+> transform as' = let m = Map.map uniq $ Map.fromListWith (++) as' in m
+
+> uniq :: (Ord a) => [a] -> [a]
+> uniq = Set.toList . Set.fromList
+
+ify :: Map.Map [Pos] [(Token, [Pos])] -> [Pos] -> [Automaton] -> Map.Map [Pos] [(Token, [Pos])]
+
+ ify known current ton = nextStates where
+    nextStates = (transform . map next . split) ton
+    reducer :: (Pos, Map Token [Pos]) -> Map Pos Map Token [Pos]
+    reducer = fold (curry $ insertWith (flip const))
+
+Map.map (\x -> (Set.fold addpos [] x, Set.toList x)) $ Map.fromListWith (Set.union) $ map (transform . next) ton
+
+where
+
+    -- folds the position of an automaton in with a list
+    addpos :: Automaton -> [Pos] -> [Pos]
+    addpos x accum = pos (head x) : accum 
+    reducer :: ([Pos], [Automaton]) -> ([Pos], [Automaton]) -> ([Pos], [Automaton])
+    reducer (x1, y1) (x2, y2) = (x1 ++ x2, y1 ++ y2)
