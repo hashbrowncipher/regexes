@@ -1,8 +1,55 @@
-> module Regex (parseRegex, parse, take1, match, split) where
+>{-# LANGUAGE ViewPatterns #-}
+>-- module Regex (parse) where
 > import qualified Data.Map as Map
 > import qualified Data.Set as Set
+> import Control.Monad
 
-We represent a regular expression as a finite state automaton.  Initially, this is a NFA.
+We represent a regular expression as an automaton, roughly following Russ Cox's
+"Regular Expression Matching, the Virtual Machine Approach" [1].  Each
+automaton is based recursively on its successor automaton.
+
+The (Take c a) automaton (known as "char" in [1]) is an automaton that consumes
+a single character c from the input string, and then continues with automaton
+a.  The (Split x y) automaton does nothing to the input string, but is followed
+by two automata x and y.  The Match automaton indicates that the regular
+expression matches, iff the string has been fully consumed.
+
+> data Automaton = 
+>   Take Char Automaton
+>   | Split Automaton Automaton
+>   | Match
+>   deriving (Show, Eq)
+
+We will build an automaton piecemeal by parsing the input regex from left to
+right.  When we parse a plain token -- the letter 'a', for instance -- we will
+know to add (Take 'a') to our automaton, but we will not yet have the successor
+automaton.  Therefore we define a type Active to represent a partial Automaton
+that need to be completed by a successor automaton.
+
+> type Active = Automaton -> Automaton
+
+Regular expressions can contain alternations.  When we encounter an
+alternation, we begin work on a new automaton, saving the old state.  Because
+alternations can be nested, this creates the possibility of a tree of states.
+
+> data Loc = -- a location in the tree of states
+>       Lft State -- the left side of an alternation
+>       | Rgt [Active] State -- the right side of an alternation
+>       | Top -- not in an alternation; the root of the tree
+
+> data Thing =
+>       F { a :: String }
+>       | G { a :: String, b :: String }
+
+A state is the tuple of a Loc in the tree of states, and a list of Actives that
+will compose the final automatons
+
+> type State = (Loc, [Active])
+
+Some tokens are 
+
+> type Token = (Char, Bool)
+
 
 We will consider five basic operations for 
 
@@ -13,33 +60,6 @@ There are three basic operations involved in regular expression matching.
 
 We temporarily assume that tokens are just Chars
 
-> type Token = Char
-
-An action consumes a token (Just x) or nothing (Nothing), and leads to a new state
-An automaton matches a regular expression.  We represent automatons as lists of instructions.  Each instruction in the list thus has its successor (the next item in the list).
-
-We store with each instruction the location in the original regular expression string from where it came.  This allows us to check for equality when traversing the graph.
-
-> type Automaton = [Instruction] --Type synonym
-> type Pos = Integer --Type synonym (they're just so easy to use)
-> data Instruction = --Algebraic type
-> 	Take Pos Token
-> 	| Split Pos Automaton Automaton
->	deriving (Eq)
-
-> instance Show Instruction where
->  show (Take n x) = "Take@" ++ show n ++ " " ++ show x
->  show (Split n _ _) = "Split@" ++ show n
-
-parseRegex takes a regular expression string and parses it, producing a Haskell
-data structure which represents the NFA that consumes such a regex.
-
-> parseRegex :: String -> Either Loc Automaton
-> parseRegex = p 0 ([], Nil)
->   where
->     p n (ton, Nil) [] = Right (reverse ton)
->     p n (_, loc) []   = Left loc
->     p n state (x:xs)  = p (n+1) (parse n state x) xs
 
 The Parse (a,b) type contains all of the state for the ongoing parsing operation.
 a) the automaton being operated upon
@@ -53,107 +73,71 @@ object from before we entered the alternation is held in the Lft object
 and we hold the automaton that was generated on the left side of the alternation
 and the parent Parse object
 
-c) not in an alternation (Nil)
+c) not in an alternation (Top)
 
-> type Parse = (Automaton, Loc)
-> data Loc = Lft Parse | Rgt Automaton Parse | Nil deriving Show
+> parse :: String -> Automaton 
+> parse xs = case foldl go (Top, []) (escape xs) of (Top, a) -> coalesce a Match
+>          where
+>   escape :: [Char] -> [Token]
+>   escape [] = []
+>   escape ('\\':x:xs) = (x, True) : (escape xs)
+>   escape (x:xs) = (x, False) : (escape xs)
+>
+>   go :: State -> Token ->  State
+>   go state ('(', False)                           = (Lft state, [])
+>   go (Lft parent, left) ('|', False)              = (Rgt left parent, [])
+>   go (Rgt left (ploc, pton), right) (')',False)   = (ploc, (csplit left right) : pton)
+>   go (loc, t:xt) ('*', False)                     = (loc,  (kleene t) : xt)
+>   go (loc, t:xt) ('?', False)                     = (loc,  (question t) : xt)
+>   go (loc, t:xt) ('+', False)                     = (loc,  (plus t) : xt)
+>   go (loc, ton) (char, _)                         = (loc,  (Take char) : ton)
 
-> parse						:: Pos -> Parse -> Char -> Parse
-> parse n state '('				= ([], Lft state)
-> parse n (left, Lft parent) '|'		= ([], Rgt (reverse left) parent)
-> parse n (ton, Rgt left (pton, ploc)) ')'	= ((Split n left (reverse ton)):pton, ploc)
->       -- pton == parent automaton,
->       -- ploc == parent location
-> parse n (inst:ton, loc) '*'			= ((kleene n inst):ton, loc)
-> parse n (inst:ton, loc) '?'			= ((question n inst):ton, loc)
-> parse n (inst:ton, loc) '+'			= ((plus n inst) ++ ton, loc)
-> parse n (ton, loc) c				= ((Take n c):ton, loc)
+> split :: Active -> Active -> Active
+> split = liftM2 Split
 
-> instance Ord Instruction where
->  compare x y = compare (pos x) (pos y)
+   | lm && rm = Match
+   | lm = MSplit rf
+   | rm = MSplit lf
+   | otherwise = Split lf rf
+   where
+   isTerminal (Match) = True
+   isTerminal (MSplit a) = True
+   isTerminal _ = False
+   lf = left f
+   lm = isTerminal lf
+   rf = right f
+   rm = isTerminal rf
 
-The kleene (star) automaton is a choice:
-a) execute the underlying automaton and then go back to the starting state
-b) an Epsilon move
+> coalesce :: [Active] -> Active
+> coalesce = flip (foldl (flip ($)))
+> c = coalesce
 
-> kleene :: Pos -> Instruction -> Instruction
-> kleene n ton = let ret = Split n (ton:[ret]) [] in ret
+> csplit left right = split (c left) (c right)
 
-> question :: Pos -> Instruction -> Instruction
-> question n ton = Split n [] [ton]
+The question modifier is a choice:
+a) go to the following state (equivalent to executing id)
+b) 
 
-> plus :: Pos -> Instruction -> Automaton
-> plus n inst = let ret = inst:[Split n [] ret] in (reverse ret) -- return the reverse, it will be reversed again later
+> question :: Active -> Active
+> question = split id
 
-> match :: Automaton -> String -> Bool
-> match a = run (split a)
+The kleene (star) modifier is a choice:
+a) go to the following state
+b) execute the underlying automaton and then go back to the starting state
 
-> run :: [Automaton] -> String -> Bool
-> run tons "" = any null tons
-> run tons (x:xs) = run (concatMap (take1 x) tons) xs
+> kleene :: Active -> Active
+> kleene t = let ret = question (c [ret, t]) in ret
 
-> take1 :: Char -> Automaton -> [Automaton]
-> take1 c ((:) (Take _ x) ton)
->   | x == c = split ton
->   | otherwise = []
+> plus :: Active -> Active 
+> plus t = c [kleene t, t] 
 
-split traverses an automaton, _splitting_ all Split nodes into two separate automata. Where the splitted node also contained a Split node, split continues recursively into the child nodes. The result is a list of automata x such that (head x) is a Take node.
+> run :: Automaton -> String -> Bool
+> run Match xs = xs == []
+> run (Take c xt) (x:xs)
+>   | x == c = run xt xs
+>   | otherwise = False
+> run (Split a b) xs = (run a xs) || (run b xs)
+> run _ [] = False
 
-split must be careful not to follow loops that have no Take nodes. Such loops exist in regular expressions such as "(a|)*", because the Kleene closure of the alternation creates a loop over no Take nodes.  It is unclear whether this kind of regex has any useful purpose, but split simply treats the loops as Epsilon transitions to the successor automaton.  split achieves this by comparing against a list (inefficient) of nodes that is has been to since it last saw a Take node.
 
-> split :: Automaton -> [Automaton]
-> split ton = s [] ton
->   where
->     s pos ((:) (Split p a b) ton)
->       | not (elem p pos) = (s (p:pos) (a ++ ton)) ++ (s (p:pos) (b ++ ton))
->       | otherwise        = []
->     s _ ton = [ton]
-
-> type DFAPos = (Bool, [Pos])
-
-> pos (Take p c) = p
-> pos (Split p a b) = p
-
-> dfaNode ton = foldl info (False, []) (split ton)
->   where
->     info :: DFAPos -> Automaton -> DFAPos
->     info (_ , p) [] = (True, p)
->     info (accept, p) ton = (accept, (pos $ head ton) : p)
-
-> next :: Automaton -> (Token, [Automaton])
-> next ((:) (Take _ c) ton) = (c, split ton)
-
-succ 0 
-
-dfaEdges :: [Automaton] -> ((Pos, Token), [Pos])
-dfaEdges ton = edges 0 (split ton)
-  where
-    edges :: ((Pos, Token), [Pos]) -> (Pos,Token) -> ((Pos, Token), [Pos])
-    edges known current ton
-      | not (elem 
-dfaEdge :: [Automaton]
-
-dfaEdges ton :: Automaton -> Map [Pos] [(Token, [Pos])]
-dfaEdges ton = ify (Map.empty) (split c
-
-> transform as' = let m = Map.map uniq $ Map.fromListWith (++) as' in m
-
-> uniq :: (Ord a) => [a] -> [a]
-> uniq = Set.toList . Set.fromList
-
-ify :: Map.Map [Pos] [(Token, [Pos])] -> [Pos] -> [Automaton] -> Map.Map [Pos] [(Token, [Pos])]
-
- ify known current ton = nextStates where
-    nextStates = (transform . map next . split) ton
-    reducer :: (Pos, Map Token [Pos]) -> Map Pos Map Token [Pos]
-    reducer = fold (curry $ insertWith (flip const))
-
-Map.map (\x -> (Set.fold addpos [] x, Set.toList x)) $ Map.fromListWith (Set.union) $ map (transform . next) ton
-
-where
-
-    -- folds the position of an automaton in with a list
-    addpos :: Automaton -> [Pos] -> [Pos]
-    addpos x accum = pos (head x) : accum 
-    reducer :: ([Pos], [Automaton]) -> ([Pos], [Automaton]) -> ([Pos], [Automaton])
-    reducer (x1, y1) (x2, y2) = (x1 ++ x2, y1 ++ y2)
+[1] http://swtch.com/~rsc/regexp/regexp2.html
