@@ -16,7 +16,7 @@ expression matches, iff the string has been fully consumed.
 
 > data Automaton = 
 >   Take Char Automaton
->   | Split Automaton Automaton
+>   | Split Int [Automaton]
 >   | Match
 >   deriving (Show, Eq)
 
@@ -32,23 +32,15 @@ Regular expressions can contain alternations.  When we encounter an
 alternation, we begin work on a new automaton, saving the old state.  Because
 alternations can be nested, this creates the possibility of a tree of states.
 
-> data Loc = -- a location in the tree of states
->       Lft State -- the left side of an alternation
->       | Rgt [Active] State -- the right side of an alternation
->       | Top -- not in an alternation; the root of the tree
-
-> data Thing =
->       F { a :: String }
->       | G { a :: String, b :: String }
-
 A state is the tuple of a Loc in the tree of states, and a list of Actives that
 will compose the final automatons
 
-> type State = (Loc, [Active])
-
 Some tokens are 
 
-> type Token = (Char, Bool)
+> data Token = 
+>   Raw Char
+>   | Op Char
+    
 
 
 We will consider five basic operations for 
@@ -60,6 +52,8 @@ There are three basic operations involved in regular expression matching.
 
 We temporarily assume that tokens are just Chars
 
+> type StateView = ([Active], [Active]) -- siblings, current
+> type State = [StateView]
 
 The Parse (a,b) type contains all of the state for the ongoing parsing operation.
 a) the automaton being operated upon
@@ -75,69 +69,59 @@ and the parent Parse object
 
 c) not in an alternation (Top)
 
-> parse :: String -> Automaton 
-> parse xs = case foldl go (Top, []) (escape xs) of (Top, a) -> coalesce a Match
+> compile :: String -> Automaton 
+> compile xs = case foldl count (0, [([], [])]) (lex xs) of (_, [([], ton)]) -> coalesce ton Match
 >          where
->   escape :: [Char] -> [Token]
->   escape [] = []
->   escape ('\\':x:xs) = (x, True) : (escape xs)
->   escape (x:xs) = (x, False) : (escape xs)
+>   lex :: [Char] -> [Token]
+>   lex [] = []
+>   lex ('\\':x:xs) = (Raw x) : (lex xs)
+>   lex (x:xs) = (Op x) : (lex xs)
 >
->   go :: State -> Token ->  State
->   go state ('(', False)                           = (Lft state, [])
->   go (Lft parent, left) ('|', False)              = (Rgt left parent, [])
->   go (Rgt left (ploc, pton), right) (')',False)   = (ploc, (csplit left right) : pton)
->   go (loc, t:xt) ('*', False)                     = (loc,  (kleene t) : xt)
->   go (loc, t:xt) ('?', False)                     = (loc,  (question t) : xt)
->   go (loc, t:xt) ('+', False)                     = (loc,  (plus t) : xt)
->   go (loc, ton) (char, _)                         = (loc,  (Take char) : ton)
+>   count :: (Int, State) -> Token -> (Int, State)
+>   count (n, s) t = (n + 1, go n s t)
+>
+>   go :: Int -> State -> Token ->  State
+>   go n p (Op '(')                                 = ([], []):p
+>   go n ((ss, c):p) (Op '|')                       = ((coalesce c):ss, []):p
+>   go n ((ss, c):(pss, pc):gp) (Op ')')            = ((split n prev ((coalesce c):ss)):pss, pc):gp
+>   go n (p, ss, c:tc) (Op '*')                     = (ss, (kleene n c):tc):p
+>   go n (p, ss, c:tc) (Op '?')                     = (ss, (question n c):tc):p
+>   go n (p, ss, c:tc) (Op '+')                     = (ss, (plus n c):tc):p
+>   go n state (Op t)                               = go n state (Raw t)
+>   go n (p, ss, c:tc) (Raw t)                      = (ss, (Take t):tc):p
 
-> split :: Active -> Active -> Active
-> split = liftM2 Split
-
-   | lm && rm = Match
-   | lm = MSplit rf
-   | rm = MSplit lf
-   | otherwise = Split lf rf
-   where
-   isTerminal (Match) = True
-   isTerminal (MSplit a) = True
-   isTerminal _ = False
-   lf = left f
-   lm = isTerminal lf
-   rf = right f
-   rm = isTerminal rf
+> split :: Int -> [Int] -> [Active] -> Active
+> split n prev ts f = Split n (map f (filter (not . isLoop) ts)) where
+>   isLoop t@(Split d _) = elem d prev --it's a loop if we are going somewhere in prev
+>   isLoop t = False
 
 > coalesce :: [Active] -> Active
 > coalesce = flip (foldl (flip ($)))
-> c = coalesce
-
-> csplit left right = split (c left) (c right)
 
 The question modifier is a choice:
 a) go to the following state (equivalent to executing id)
 b) 
 
-> question :: Active -> Active
-> question = split id
+> question :: (Int, [Int]) -> Active -> Active
+> question n prev = split n prev . (:[id])
 
 The kleene (star) modifier is a choice:
 a) go to the following state
 b) execute the underlying automaton and then go back to the starting state
 
-> kleene :: Active -> Active
-> kleene t = let ret = question (c [ret, t]) in ret
+> kleene :: Int -> [Int] -> Active -> Active
+> kleene n prev t = let ret = question n prev (coalesce [ret, t]) in ret
 
-> plus :: Active -> Active 
-> plus t = c [kleene t, t] 
+> plus :: Int -> [Int] -> Active -> Active 
+> plus n prev t = coalesce [kleene n prev t, t] 
 
-> run :: Automaton -> String -> Bool
-> run Match xs = xs == []
-> run (Take c xt) (x:xs)
->   | x == c = run xt xs
->   | otherwise = False
-> run (Split a b) xs = (run a xs) || (run b xs)
-> run _ [] = False
+ run :: Automaton -> String -> Bool
+ run Match xs = xs == []
+ run (Take c xt) (x:xs)
+   | x == c = run xt xs
+   | otherwise = False
+ run (Split a b) xs = (run a xs) || (run b xs)
+ run _ [] = False
 
 
 [1] http://swtch.com/~rsc/regexp/regexp2.html
