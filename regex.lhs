@@ -8,14 +8,14 @@ We represent a regular expression as an automaton, roughly following Russ Cox's
 "Regular Expression Matching, the Virtual Machine Approach" [1].  Each
 automaton is based recursively on its successor automaton.
 
-The (Take c a) automaton (known as "char" in [1]) is an automaton that consumes
+The (Take c t) automaton (known as "char" in [1]) is an automaton that consumes
 a single character c from the input string, and then continues with automaton
-a.  The (Split x y) automaton does nothing to the input string, but is followed
-by two automata x and y.  The Match automaton indicates that the regular
-expression matches, iff the string has been fully consumed.
+a.  The (Split [ts]) automaton does nothing with the input string, but is
+followed by the automata in [ts].  The Match automaton indicates that the
+regular expression matches, iff the string has been fully consumed.
 
 > data Automaton = 
->   Take Char Automaton
+>   Take Int Char Automaton
 >   | Split Int [Automaton]
 >   | Match
 >   deriving (Show, Eq)
@@ -25,8 +25,6 @@ right.  When we parse a plain token -- the letter 'a', for instance -- we will
 know to add (Take 'a') to our automaton, but we will not yet have the successor
 automaton.  Therefore we define a type Active to represent a partial Automaton
 that need to be completed by a successor automaton.
-
-> type Active = Automaton -> Automaton
 
 Regular expressions can contain alternations.  When we encounter an
 alternation, we begin work on a new automaton, saving the old state.  Because
@@ -41,7 +39,7 @@ Some tokens are
 >   Raw Char
 >   | Op Char
     
-
+> type Active = Automaton -> Automaton
 
 We will consider five basic operations for 
 
@@ -52,8 +50,7 @@ There are three basic operations involved in regular expression matching.
 
 We temporarily assume that tokens are just Chars
 
-> type StateView = ([Active], [Active]) -- siblings, current
-> type State = [StateView]
+> type State = [([Active], [Active])]
 
 The Parse (a,b) type contains all of the state for the ongoing parsing operation.
 a) the automaton being operated upon
@@ -70,50 +67,75 @@ and the parent Parse object
 c) not in an alternation (Top)
 
 > compile :: String -> Automaton 
-> compile xs = case foldl count (0, [([], [])]) (lex xs) of (_, [([], ton)]) -> coalesce ton Match
+> compile xs = case foldl parse start (lex xs) of (_, [([], ton)]) -> (coalesce ton) Match
 >          where
 >   lex :: [Char] -> [Token]
 >   lex [] = []
 >   lex ('\\':x:xs) = (Raw x) : (lex xs)
 >   lex (x:xs) = (Op x) : (lex xs)
 >
->   count :: (Int, State) -> Token -> (Int, State)
->   count (n, s) t = (n + 1, go n s t)
+>   start = (0, [([], [])])
 >
->   go :: Int -> State -> Token ->  State
->   go n p (Op '(')                                 = ([], []):p
->   go n ((ss, c):p) (Op '|')                       = ((coalesce c):ss, []):p
->   go n ((ss, c):(pss, pc):gp) (Op ')')            = ((split n prev ((coalesce c):ss)):pss, pc):gp
->   go n (p, ss, c:tc) (Op '*')                     = (ss, (kleene n c):tc):p
->   go n (p, ss, c:tc) (Op '?')                     = (ss, (question n c):tc):p
->   go n (p, ss, c:tc) (Op '+')                     = (ss, (plus n c):tc):p
->   go n state (Op t)                               = go n state (Raw t)
->   go n (p, ss, c:tc) (Raw t)                      = (ss, (Take t):tc):p
+>   parse :: (Int, State) -> Token -> (Int, State)
+>   parse (n, p) t = (n + 1, go p t) where
+>       sibling ((ss, c):p)             = ((coalesce c):ss, []):p
+>       finish ((ss, []):(pss, pc):gp)  = (pss, (split n ss):pc):gp
+>
+>       go s (Op '(')                   = ([], []):s
+>       go s (Op '|')                   = sibling s
+>       go s (Op ')')                   = finish $ sibling s
+>       go ((ss, c:cs):p) (Op '*')      = (ss, (kleene n c):cs):p
+>       go ((ss, c:cs):p) (Op '?')      = (ss, (question n c):cs):p
+>       go ((ss, c:cs):p) (Op '+')      = (ss, (plus n c):cs):p
+>       go s (Op t)                     = go s (Raw t)
+>       go ((ss, c):p) (Raw t)          = (ss, (Take n t):c):p
 
-> split :: Int -> [Int] -> [Active] -> Active
-> split n prev ts f = Split n (map f (filter (not . isLoop) ts)) where
->   isLoop t@(Split d _) = elem d prev --it's a loop if we are going somewhere in prev
->   isLoop t = False
+
+> split :: Int -> [Active] -> Active
+> split n ts f = Split n $ map ($ f) ts where
 
 > coalesce :: [Active] -> Active
 > coalesce = flip (foldl (flip ($)))
+
+> deloop :: Active -> Active
+> deloop ton f = prune (ton Match) f where
+>   prune Match f           = Match
+>   prune t@(Take _ _ _) f  = unprune t f
+>   prune (Split n xs) f    = simplify n $ filter (not . isMatch) $ map (flip prune f) xs
+>
+>   isMatch Match           = True
+>   isMatch _               = False
+>
+>   unprune Match f         = f
+>   unprune (Split n xs) f  = Split n $ map (flip unprune f) xs
+>   unprune (Take n c t) f  = Take n c (unprune t f)
+>
+>   simplify n (t:[])       = t
+>   simplify n ts           = Split n ts
 
 The question modifier is a choice:
 a) go to the following state (equivalent to executing id)
 b) 
 
-> question :: (Int, [Int]) -> Active -> Active
-> question n prev = split n prev . (:[id])
+> question :: Int -> Active -> Active
+> question n = split n . (:[id])
 
 The kleene (star) modifier is a choice:
 a) go to the following state
 b) execute the underlying automaton and then go back to the starting state
 
-> kleene :: Int -> [Int] -> Active -> Active
-> kleene n prev t = let ret = question n prev (coalesce [ret, t]) in ret
+> kleene :: Int -> Active -> Active
+> kleene n t = let ret = (deloop t) . ret in ret
 
-> plus :: Int -> [Int] -> Active -> Active 
-> plus n prev t = coalesce [kleene n prev t, t] 
+> plus :: Int -> Active -> Active 
+> plus n t f = t (kleene n t f)
+
+> determinize :: Automaton -> Automaton
+> determinize (Take n c t) = Take n c $ determinize t
+> determinize (Split n ts) = Split n $ map determinize ts
+> determinize Match = Match
+
+> take1 
 
  run :: Automaton -> String -> Bool
  run Match xs = xs == []
