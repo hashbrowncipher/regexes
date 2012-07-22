@@ -1,6 +1,5 @@
 >{-# LANGUAGE ViewPatterns #-}
 >-- module Regex (parse) where
-> import qualified Data.Map as Map
 > import qualified Data.Set as Set
 > import Control.Monad
 
@@ -16,9 +15,23 @@ regular expression matches, iff the string has been fully consumed.
 
 > data Automaton = 
 >   Take Int Char Automaton
->   | Split Int [Automaton]
+>   | Split Int (Set.Set Automaton)
 >   | Match
->   deriving (Show, Eq)
+>   deriving (Show)
+
+> index (Split a _) = a
+> index (Take a _ _) = a
+
+> instance Eq Automaton where
+>   (==) Match Match    = True
+>   (==) Match _        = False
+>   (==) _ Match        = False
+>   (==) a b            = index a == index b
+>
+> instance Ord Automaton where
+>   (<=) Match _        = True
+>   (<=) _ Match        = False
+>   (<=) a b            = (<=) (index a) (index b)
 
 We will build an automaton piecemeal by parsing the input regex from left to
 right.  When we parse a plain token -- the letter 'a', for instance -- we will
@@ -38,8 +51,9 @@ Some tokens are
 > data Token = 
 >   Raw Char
 >   | Op Char
-    
-> type Active = Automaton -> Automaton
+
+> type PreActive = [Int] -> Automaton
+> type Active = PreActive -> PreActive
 
 We will consider five basic operations for 
 
@@ -67,7 +81,7 @@ and the parent Parse object
 c) not in an alternation (Top)
 
 > compile :: String -> Automaton 
-> compile xs = case foldl parse start (lex xs) of (_, [([], ton)]) -> (coalesce ton) Match
+> compile xs = case foldl parse start (lex xs) of (_, [([], ton)]) -> (coalesce ton) (const Match) []
 >          where
 >   lex :: [Char] -> [Token]
 >   lex [] = []
@@ -79,7 +93,7 @@ c) not in an alternation (Top)
 >   parse :: (Int, State) -> Token -> (Int, State)
 >   parse (n, p) t = (n + 1, go p t) where
 >       sibling ((ss, c):p)             = ((coalesce c):ss, []):p
->       finish ((ss, []):(pss, pc):gp)  = (pss, (split n ss):pc):gp
+>       finish ((ss, []):(pss, pc):gp)  = (pss, (mksplit n ss):pc):gp
 >
 >       go s (Op '(')                   = ([], []):s
 >       go s (Op '|')                   = sibling s
@@ -88,62 +102,57 @@ c) not in an alternation (Top)
 >       go ((ss, c:cs):p) (Op '?')      = (ss, (question n c):cs):p
 >       go ((ss, c:cs):p) (Op '+')      = (ss, (plus n c):cs):p
 >       go s (Op t)                     = go s (Raw t)
->       go ((ss, c):p) (Raw t)          = (ss, (Take n t):c):p
-
-
-> split :: Int -> [Active] -> Active
-> split n ts f = Split n $ map ($ f) ts where
+>       go ((ss, c):p) (Raw t)          = (ss, (mktake n t):c):p
 
 > coalesce :: [Active] -> Active
-> coalesce = flip (foldl (flip ($)))
+> coalesce as f = foldr ($) f (reverse as)
 
-> deloop :: Active -> Active
-> deloop ton f = prune (ton Match) f where
->   prune Match f           = Match
->   prune t@(Take _ _ _) f  = unprune t f
->   prune (Split n xs) f    = simplify n $ filter (not . isMatch) $ map (flip prune f) xs
+> mksplit :: Int -> [Active] -> Active
+> mksplit n as f prev
+>   | elem n prev = Split 0 Set.empty
+>   | single = Set.findMin followers
+>   | otherwise = Split n followers
+>   where
 >
->   isMatch Match           = True
->   isMatch _               = False
+>   followers   = Set.unions $ map (collapse . apply) as
+>   apply a     = a f (n:prev)
 >
->   unprune Match f         = f
->   unprune (Split n xs) f  = Split n $ map (flip unprune f) xs
->   unprune (Take n c t) f  = Take n c (unprune t f)
+>   collapse (Split n as)   = as
+>   collapse a              = Set.singleton a
 >
->   simplify n (t:[])       = t
->   simplify n ts           = Split n ts
+>   single  = Set.size followers == 1
+
+> mktake :: Int -> Char -> Active
+> mktake n t f prev = Take n t (f [])
 
 The question modifier is a choice:
 a) go to the following state (equivalent to executing id)
 b) 
 
 > question :: Int -> Active -> Active
-> question n = split n . (:[id])
+> question n = mksplit n . (:[id])
 
 The kleene (star) modifier is a choice:
 a) go to the following state
 b) execute the underlying automaton and then go back to the starting state
 
 > kleene :: Int -> Active -> Active
-> kleene n t = let ret = (deloop t) . ret in ret
+> kleene n t = let ret = question n (t . ret) in ret
 
 > plus :: Int -> Active -> Active 
-> plus n t f = t (kleene n t f)
+> plus n t = t . (kleene n t)
 
-> determinize :: Automaton -> Automaton
-> determinize (Take n c t) = Take n c $ determinize t
-> determinize (Split n ts) = Split n $ map determinize ts
-> determinize Match = Match
+> run :: String -> Automaton -> Bool
+> run [] Match              = True
+> run xs (Split n as)       = any (run xs) (Set.toList as)
+> run (x:xs) (Take n c f)
+>   | x == c                = run xs f
+>   | otherwise             = False
+> run _ _                   = False
 
-> take1 
-
- run :: Automaton -> String -> Bool
- run Match xs = xs == []
- run (Take c xt) (x:xs)
-   | x == c = run xt xs
-   | otherwise = False
- run (Split a b) xs = (run a xs) || (run b xs)
- run _ [] = False
-
+> expand 0 _                = Split (-1) Set.empty
+> expand n Match            = Match
+> expand n (Take i c f)     = Take i c (expand (n-1) f)
+> expand n (Split i as)     = Split i $ Set.map (expand (n-1)) as
 
 [1] http://swtch.com/~rsc/regexp/regexp2.html
