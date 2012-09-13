@@ -5,32 +5,38 @@
 
 We represent a regular expression as an automaton, roughly following Russ Cox's
 "Regular Expression Matching, the Virtual Machine Approach" [1].  Each
-automaton is based recursively on its successor automaton.
+automaton is based recursively on its successor automat(a).
 
-The (Take c t) automaton (known as "char" in [1]) is an automaton that consumes
-a single character c from the input string, and then continues with automaton
-a.  The (Split [ts]) automaton does nothing with the input string, but is
-followed by the automata in [ts].  The Match automaton indicates that the
+The `Take n c t` automaton (known as "char" in [1]) is an automaton that
+consumes a single character c from the input string, and then continues with
+automaton a.  The `Split n {ts}` automaton does nothing with the input string,
+but is followed by the automata in {ts}.  `Take` and `Split` are both labeled
+with the position in the regexp that catalyzed the node's generation.  This is
+used to disambiguate the nodes. The `Match` automaton indicates that the
 regular expression matches, iff the string has been fully consumed.
 
-> data Automaton = 
+[1] http://swtch.com/~rsc/regexp/regexp2.html
+
+> data Automaton =
 >   Take Int Char Automaton
 >   | Split Int (Set.Set Automaton)
 >   | Match
->   deriving (Show)
 
 > index (Split a _) = a
 > index (Take a _ _) = a
 
+We will be storing `Set`s of automata.  These typeclasses are required by the
+`Set` module.
+
 > instance Eq Automaton where
->   (==) Match Match    = True
->   (==) Match _        = False
->   (==) _ Match        = False
+>   (==) Match Match  = True
+>   (==) Match _       = False
+>   (==) _ Match       = False
 >   (==) a b            = index a == index b
 >
 > instance Ord Automaton where
->   (<=) Match _        = True
->   (<=) _ Match        = False
+>   (<=) Match _       = True
+>   (<=) _ Match       = False
 >   (<=) a b            = (<=) (index a) (index b)
 
 We will build an automaton piecemeal by parsing the input regex from left to
@@ -42,9 +48,6 @@ that need to be completed by a successor automaton.
 Regular expressions can contain alternations.  When we encounter an
 alternation, we begin work on a new automaton, saving the old state.  Because
 alternations can be nested, this creates the possibility of a tree of states.
-
-A state is the tuple of a Loc in the tree of states, and a list of Actives that
-will compose the final automatons
 
 Some tokens are 
 
@@ -107,27 +110,61 @@ c) not in an alternation (Top)
 > coalesce :: [Active] -> Active
 > coalesce as f = foldr ($) f (reverse as)
 
+`mksplit` is a wrapper of the `Split` summand defined above.  It performs
+a conversion to a DFA before returning the final `Split` node.
+
+If we have been asked to create a node with index `n` that is in the list of
+previous ε-moves `prev`, we have followed a loop of ε-moves.  Instead of
+continuing the loop ad infinitum, simply return a dummy node.
+
+Otherwise, compute the successor node, converting to a DFA as we go.
+
 > mksplit :: Int -> [Active] -> Active
 > mksplit n as f prev
 >   | elem n prev = Split 0 Set.empty
->   | single = Set.findMin followers
->   | otherwise = Split n followers
+>   | otherwise = ret
 >   where
->
->   followers   = Set.unions $ map (collapse . apply) as
->   apply a     = a f (n:prev)
->
+
+    We've gotten a list of `Active`s in.  To make them `Automaton`s, we supply a
+    context by providing a successor function and a list of ε-moves we've made.
+
+>   contextualize   :: Active -> Automaton
+>   contextualize a = a f (n:prev)
+
+    As we go, we will create a massive graph of `Split`s which represent the
+    NFA. To convert to a DFA, we need to "collapse" this graph to get all of the
+    successor automata which are reachable using only ε-moves from a given node.
+    `collapse` achieves this goal by returning the `Set` of all automata that can
+    be reached using ε-moves when provided an automaton *a*. It makes the
+    assumption that `collapse` has already been called on *a*'s successors.
+
+    `collapse` has the ancillary benefit of removing the `Split 0 Set.empty` nodes
+    inserted when `mksplit` detects a cycle.
+
+>   collapse                :: Automaton -> Set.Set Automaton
 >   collapse (Split n as)   = as
 >   collapse a              = Set.singleton a
->
->   single  = Set.size followers == 1
+
+    Compute our successor nodes.  We union the result to weed out duplicates.
+
+>   successors  = Set.unions $ map (collapse . contextualize) as
+
+    Once we know our successor nodes, we will need to the results into a new Split,
+    with one exception.  If there is only one node in the set of successors, return
+    it on its own.
+
+>   wrap s
+>       | Set.size s == 1 = Set.findMin s
+>       | otherwise = Split n s
+
+>   ret         = wrap successors
 
 > mktake :: Int -> Char -> Active
 > mktake n t f prev = Take n t (f [])
 
 The question modifier is a choice:
 a) go to the following state (equivalent to executing id)
-b) 
+b) execute the underlying automaton and then go to the successor
 
 > question :: Int -> Active -> Active
 > question n = mksplit n . (:[id])
